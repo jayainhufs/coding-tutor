@@ -1,15 +1,19 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 
-declare global { interface Window { loadPyodide?: any } }
+declare global {
+  interface Window {
+    loadPyodide?: any;
+  }
+}
 
-/** 신뢰도 높은 후보들을 여러 개 둡니다 */
+/** 신뢰도 높은 CDN 후보들 */
 const CANDIDATES = [
   // 최신 계열
-  { js: "https://cdn.jsdelivr.net/pyodide/v0.26.1/full/pyodide.js",  index: "https://cdn.jsdelivr.net/pyodide/v0.26.1/full/" },
+  { js: "https://cdn.jsdelivr.net/pyodide/v0.26.1/full/pyodide.js", index: "https://cdn.jsdelivr.net/pyodide/v0.26.1/full/" },
   { js: "https://cdn.jsdelivr.net/npm/pyodide@0.26.1/full/pyodide.js", index: "https://cdn.jsdelivr.net/npm/pyodide@0.26.1/full/" },
   // 한 버전 낮게
-  { js: "https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js",  index: "https://cdn.jsdelivr.net/pyodide/v0.25.1/full/" },
+  { js: "https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js", index: "https://cdn.jsdelivr.net/pyodide/v0.25.1/full/" },
   { js: "https://cdn.jsdelivr.net/npm/pyodide@0.25.1/full/pyodide.js", index: "https://cdn.jsdelivr.net/npm/pyodide@0.25.1/full/" },
 ];
 
@@ -18,23 +22,23 @@ function looksLikeHtml(s: string) {
   return head.includes("<!doctype") || head.includes("<html");
 }
 
-async function fetchAsText(url: string) {
-  const r = await fetch(url, { mode: "cors" });
+/** url이 JS인지 사전 검증 후 <script src=…>로 안전하게 로드 */
+async function loadScriptValidated(url: string) {
+  // 1) 받아서 HTML 에러페이지 여부 확인
+  const r = await fetch(url, { mode: "cors", cache: "no-store" });
   if (!r.ok) throw new Error(`HTTP ${r.status} @ ${url}`);
-  const text = await r.text();
-  if (looksLikeHtml(text)) throw new Error(`Got HTML instead of JS @ ${url}`);
-  return text;
-}
+  const sniff = await r.text();
+  if (looksLikeHtml(sniff)) throw new Error(`Got HTML instead of JS @ ${url}`);
 
-function injectScriptFromString(code: string) {
-  return new Promise<void>((resolve, reject) => {
-    const blob = new Blob([code], { type: "text/javascript" });
-    const src = URL.createObjectURL(blob);
+  // 2) 실제로 <script src="..."> 로드 (Blob 주입 X → *.map 이슈 원천 차단)
+  await new Promise<void>((resolve, reject) => {
     const s = document.createElement("script");
-    s.src = src;
+    s.src = url;
     s.async = true;
-    s.onload = () => { URL.revokeObjectURL(src); resolve(); };
-    s.onerror = () => { URL.revokeObjectURL(src); reject(new Error("script inject failed")); };
+    s.crossOrigin = "anonymous";
+    s.referrerPolicy = "no-referrer";
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error(`script load failed @ ${url}`));
     document.head.appendChild(s);
   });
 }
@@ -47,7 +51,6 @@ export function usePyodide() {
   const pyRef = useRef<any>(null);
   const indexUrlRef = useRef<string | null>(null);
 
-  // 스크립트 로드 + pyodide 초기화
   useEffect(() => {
     (async () => {
       try {
@@ -57,9 +60,8 @@ export function usePyodide() {
           let lastErr: any = null;
           for (const c of CANDIDATES) {
             try {
-              const js = await fetchAsText(c.js);      // 1) 받아본 뒤
-              await injectScriptFromString(js);        // 2) 로컬로 주입(크로스오리진 문제 회피)
-              indexUrlRef.current = c.index;           // 3) 같은 base로 리소스 받기
+              await loadScriptValidated(c.js);
+              indexUrlRef.current = c.index;
               lastErr = null;
               break;
             } catch (e) {
